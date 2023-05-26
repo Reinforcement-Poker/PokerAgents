@@ -16,7 +16,7 @@ def eval_model(env) -> int:
 
 if __name__ == "__main__":
     env = rlcard.make("no-limit-holdem", config={"seed": 0, "game_num_players": 6})
-    agents = [RandomAgent(num_actions=env.num_actions) for _ in range(env.num_players - 1)]
+    agents = [RandomAgent(env.num_actions) for _ in range(env.num_players - 1)]
     agents.append(FuzzyModel())
     env.set_agents(agents)
 
