@@ -4,9 +4,8 @@ from rlcard.agents import RandomAgent
 from models import FuzzyModel
 
 
-def eval_model(env) -> int:
+def eval_model(env, n_games: int = 1000) -> int:
     profit = 0
-    n_games = 1_000
     for _ in range(n_games):
         _, (*_, agent) = env.run()
         profit += agent
