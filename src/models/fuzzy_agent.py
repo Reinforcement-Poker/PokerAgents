@@ -1,7 +1,6 @@
 from typing import Callable
 
 import numpy as np
-import skfuzzy as fuzz
 from rlcard.games.nolimitholdem.game import Action
 from skfuzzy.control import (
     Antecedent,
@@ -24,19 +23,14 @@ class FuzzyModel:
 
         # Fuzzy variables
         hand_rank = Antecedent(np.arange(0, 1, 0.001), "hand_rank")
-        pot = Antecedent(np.arange(0, 20, 1), "pot")
+        pot = Antecedent(np.arange(0, 25, 1), "pot")
         cost = Antecedent(np.arange(0, 1, 0.001), "cost")
         action = Consequent(np.arange(0, 101, 1), "action")
 
         hand_rank.automf(5)
         pot.automf(3, names=["low", "medium", "high"])
         cost.automf(3, names=["low", "medium", "high"])
-
-        action["fold"] = fuzz.trimf(action.universe, [0, 0, 25])
-        action["call"] = fuzz.trimf(action.universe, [0, 25, 52])
-        action["raise_low"] = fuzz.trimf(action.universe, [25, 52, 72])
-        action["raise_high"] = fuzz.trimf(action.universe, [52, 72, 100])
-        action["all_in"] = fuzz.trimf(action.universe, [72, 100, 100])
+        action.automf(5, names=["fold", "call", "raise_low", "raise_high", "all_in"])
 
         all_pot = pot["low"] | pot["medium"] | pot["high"]
         all_cost = cost["low"] | cost["medium"] | cost["high"]
