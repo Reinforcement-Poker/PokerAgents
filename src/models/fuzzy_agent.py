@@ -11,6 +11,7 @@ from skfuzzy.control import (
 )
 
 from utils.hand_ranker import get_hand_score
+from utils.types import RlcardState
 
 
 class FuzzyModel:
@@ -42,35 +43,35 @@ class FuzzyModel:
         r3 = Rule(hand_rank["average"] & pot["high"] & cost["high"], action["fold"])
         r4 = Rule(hand_rank["average"] & pot["high"] & cost["medium"], action["fold"])
         r5 = Rule(hand_rank["average"] & pot["high"] & cost["low"], action["call"])
-        r6 = Rule(hand_rank["average"] & (pot["medium"] | pot["low"]) & all_cost, action["call"])
+        r6 = Rule(hand_rank["average"] & no_high_pot & all_cost, action["call"])
         r7 = Rule(hand_rank["decent"] & pot["high"] & all_cost, action["fold"])
         r8 = Rule(hand_rank["decent"] & no_high_pot & all_cost, action["raise_high"])
         r9 = Rule(hand_rank["good"] & pot["high"] & all_cost, action["all_in"])
-        rA = Rule(hand_rank["good"] & (pot["medium"] | pot["low"]) & all_cost, action["raise_low"])
+        rA = Rule(hand_rank["good"] & no_high_pot & all_cost, action["raise_low"])
 
         rule_list = [r1, r2, r3, r4, r5, r6, r7, r8, r9, rA]
         action_ctrl = ControlSystem(rule_list)
         self.action_sim = ControlSystemSimulation(action_ctrl)
 
-    def step(self, state) -> Action:
+    def step(self, state: RlcardState) -> Action:
         obs = state["raw_obs"]
         board = obs["public_cards"]
         hand = obs["hand"]
+        pot = obs["pot"]
         my_chips = obs["my_chips"]
         max_chips = max(obs["all_chips"])
+        actions = obs["legal_actions"]
 
-        hand_rank = self.hand_ranker(hand, board)
-        pot = obs["pot"]
+        n_actions = len(actions)
         cost = (max_chips - my_chips) / pot
 
+        hand_rank = self.hand_ranker(hand, board)
         score = self.make_prediction(hand_rank, pot, cost)
-        actions = obs["legal_actions"]
-        n_actions = len(actions)
         action_index = int(n_actions * score / 100)
 
         return actions[action_index]
 
-    def eval_step(self, state) -> tuple[Action, float]:
+    def eval_step(self, state: RlcardState) -> tuple[Action, float]:
         return self.step(state), 0
 
     def make_prediction(self, hand_rank: float, pot: float, cost: float) -> float:
