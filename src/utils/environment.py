@@ -1,11 +1,11 @@
-import pettingzoo.classic.rlcard_envs.texas_holdem_no_limit as thnl
-from pettingzoo.utils.env import AgentID
-from pettingzoo.utils import wrappers
-from rlcard.games.nolimitholdem.game import Action, Stage
-import numpy as np
-from typing import TypedDict, OrderedDict, Any
 from dataclasses import dataclass
+from typing import Any, OrderedDict, TypedDict
 
+import numpy as np
+import pettingzoo.classic.rlcard_envs.texas_holdem_no_limit as thnl
+from pettingzoo.utils import wrappers
+from pettingzoo.utils.env import AgentID
+from rlcard.games.nolimitholdem.game import Action, Stage
 
 Card = str
 
@@ -77,7 +77,8 @@ class raw_env(thnl.raw_env):
         super().reset(seed, options)
         self.action_record: list[ActionRecord] = []
         self.trace: Trace = []
-        self.button: int = -1
+        current_player = self._name_to_int(self.agent_selection)
+        self.button: int = (current_player - 3) % self.num_players
 
     def observe(self, agent) -> Observation:
         # Returns the state for every agent, the parameter agent is only needed for super().observe() invocation
@@ -95,8 +96,6 @@ class raw_env(thnl.raw_env):
             )
 
         current_player = self._name_to_int(self.agent_selection)
-        if self.button == -1:
-            self.button = (current_player - 3) % self.num_players
         obs = self.env.get_state(current_player)
 
         state = State(
@@ -141,23 +140,14 @@ class raw_env(thnl.raw_env):
             self.infos[agent],
         )
 
-    def get_trace(self) -> Trace:
-        return self.trace
-
-    def get_action_record(self) -> list[ActionRecord]:
-        return self.action_record
-
 
 class TerminateIllegalWrapper(wrappers.TerminateIllegalWrapper):
     def __init__(self, env: raw_env, illegal_reward: float):
         super().__init__(env, illegal_reward)
         self.env: raw_env
 
-    def get_trace(self) -> Trace:
-        return self.env.get_trace()
-
-    def get_action_record(self) -> list[ActionRecord]:
-        return self.env.get_action_record()
+    def __getattr__(self, item):
+        return getattr(self.env, item)
 
 
 class AssertOutOfBoundsWrapper(wrappers.AssertOutOfBoundsWrapper):
@@ -165,11 +155,8 @@ class AssertOutOfBoundsWrapper(wrappers.AssertOutOfBoundsWrapper):
         super().__init__(env)
         self.env: raw_env
 
-    def get_trace(self) -> Trace:
-        return self.env.get_trace()
-
-    def get_action_record(self) -> list[ActionRecord]:
-        return self.env.get_action_record()
+    def __getattr__(self, item):
+        return getattr(self.env, item)
 
 
 class OrderEnforcingWrapper(wrappers.OrderEnforcingWrapper):
@@ -177,11 +164,8 @@ class OrderEnforcingWrapper(wrappers.OrderEnforcingWrapper):
         super().__init__(env)
         self.env: raw_env
 
-    def get_trace(self) -> Trace:
-        return self.env.get_trace()
-
-    def get_action_record(self) -> list[ActionRecord]:
-        return self.env.get_action_record()
+    def __getattr__(self, item):
+        return getattr(self.env, item)
 
 
 def env(**kwargs):
