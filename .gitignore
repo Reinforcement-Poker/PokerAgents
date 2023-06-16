@@ -137,3 +137,6 @@ cython_debug/
 .vscode/
 .devcontainer/
 .idea/
+
+# Secrets
+.secrets.env

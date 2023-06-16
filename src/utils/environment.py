@@ -17,6 +17,7 @@ class PlayerState:
     chips: int
     stake: int
     legal_actions: list[Action]
+    reward: float
 
 
 @dataclass
@@ -76,9 +77,9 @@ class raw_env(thnl.raw_env):
     def reset(self, seed=None, options=None):
         super().reset(seed, options)
         self.action_record: list[ActionRecord] = []
-        self.trace: Trace = []
         current_player = self._name_to_int(self.agent_selection)
         self.button: int = (current_player - 3) % self.num_players
+        self.trace: Trace = [self.observe(self.agent_selection)["state"]]
 
     def observe(self, agent) -> Observation:
         # Returns the state for every agent, the parameter agent is only needed for super().observe() invocation
@@ -93,6 +94,7 @@ class raw_env(thnl.raw_env):
                 chips=a_obs["raw_obs"]["my_chips"],
                 stake=a_obs["raw_obs"]["stakes"][a_ind],
                 legal_actions=a_obs["raw_obs"]["legal_actions"],
+                reward=self._cumulative_rewards[self._int_to_name(a_ind)],
             )
 
         current_player = self._name_to_int(self.agent_selection)
@@ -104,7 +106,7 @@ class raw_env(thnl.raw_env):
             public_cards=obs["raw_obs"]["public_cards"],
             stage=obs["raw_obs"]["stage"],
             button=self.button,
-            action_record=self.action_record,
+            action_record=self.action_record.copy(),
             rlcard_state=obs,
             pettingzoo_observation=pettingzoo_observation["observation"],
         )
@@ -118,13 +120,13 @@ class raw_env(thnl.raw_env):
         legal_actions = state.players_state[player].legal_actions
         super().step(action)
         if action is not None:
-            observation = self.observe(self.agent_selection)
-            self.trace.append(observation["state"])
             self.action_record.append(
                 ActionRecord(
                     player=player, stage=stage, action=Action(action), legal_actions=legal_actions
                 )
             )
+            observation = self.observe(self.agent_selection)
+            self.trace.append(observation["state"])
 
     def last(
         self, _: bool = True

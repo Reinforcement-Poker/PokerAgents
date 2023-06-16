@@ -27,17 +27,17 @@ def build_alphaholdem(n_actions: int) -> tf.keras.Model:
     x = tf.concat([actions_encoding, cards_encoding], axis=-1)
 
     for i in range(1, 50, 5):
-        x = tf.keras.layers.Dense(n_actions * 2 * 50 // i)(x)
+        x = tf.keras.layers.Dense((n_actions + 1) * 50 // i)(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.LeakyReLU()(x)
 
-    x = tf.keras.layers.Dense(n_actions * 2)(x)
+    x = tf.keras.layers.Dense(n_actions + 1)(x)
     policy = tf.keras.activations.softmax(x[:, :n_actions])  # type: ignore
-    rewards = tf.keras.activations.relu(x[:, n_actions:])  # type: ignore
+    value = tf.keras.activations.sigmoid(x[:, -1]) * 200 - 100  # type: ignore
 
     return tf.keras.Model(
         inputs={"actions": actions_encoder.input, "cards": cards_encoder.input},
-        outputs=[policy, rewards],
+        outputs=[policy, value],
     )
 
 

@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 from typing import Tuple
-from utils.environment import Action, Stage, State, Card, ActionRecord
+from src.utils.environment import Action, Stage, State, Card, ActionRecord
 
 
 class AlphaHoldemAgent(object):
@@ -19,18 +19,31 @@ class AlphaHoldemAgent(object):
         ), f"Model output ({model.output_shape[0][1]}) is not equal to the number of actions {self.num_actions}"
 
     def step_batch(self, states_batch: list[State]) -> list[int]:
-        actions_encoding = np.array([self.encode_actions(state) for state in states_batch])
-        cards_encoding = np.array([self.encode_cards(state) for state in states_batch])
+        actions_encoding = np.array(
+            [
+                self.encode_actions(state, self.player_id, self.num_players, self.num_actions)
+                for state in states_batch
+            ]
+        )
+        cards_encoding = np.array(
+            [self.encode_cards(state, self.player_id) for state in states_batch]
+        )
 
-        policy, pred_rewards = self.model({"actions": actions_encoding, "cards": cards_encoding})
-        return list(np.argmax(policy.numpy(), axis=-1))
+        policies, _ = self.model({"actions": actions_encoding, "cards": cards_encoding})
+        return list(tf.random.categorical(tf.math.log(policies), num_samples=1)[..., 0].numpy())
 
-    def encode_actions(self, state: State) -> np.ndarray:
+    @staticmethod
+    def encode_actions(
+        state: State,
+        player_id: int,
+        num_players: int,
+        num_actions: int,
+    ) -> np.ndarray:
         assert (
-            len(state.players_state) == self.num_players
-        ), f"AlphaHoldemAgent only supports {self.num_players} players"
+            len(state.players_state) == num_players
+        ), f"AlphaHoldemAgent only supports {num_players} players"
 
-        actions_encoding = np.zeros((24, self.num_actions, self.num_players + 2), dtype=np.float32)
+        actions_encoding = np.zeros((24, num_actions, num_players + 2), dtype=np.float32)
 
         action_record_by_stage: dict[Stage, list[ActionRecord]] = {
             stage: [] for stage in list(Stage)
@@ -41,14 +54,14 @@ class AlphaHoldemAgent(object):
         for stage, stage_records in action_record_by_stage.items():
             cycle = 0
             for record in stage_records:
-                if record.player == self.player_id:
+                if record.player == player_id:
                     # Legal actions
                     legal_actions_indices = [a.value for a in record.legal_actions]
                     actions_encoding[cycle + 6 * stage.value, legal_actions_indices, -1] = 1.0
                     cycle += 1
 
                 # Players actions
-                player_position = (record.player - self.player_id) % self.num_players
+                player_position = (record.player - player_id) % num_players
                 action_index = record.action.value
                 actions_encoding[cycle + 6 * stage.value, action_index, player_position] = 1.0
 
@@ -57,10 +70,11 @@ class AlphaHoldemAgent(object):
 
         return actions_encoding
 
-    def encode_cards(self, state: State) -> np.ndarray:
+    @staticmethod
+    def encode_cards(state: State, player_id: int) -> np.ndarray:
         cards = np.zeros((4, 13, 6), dtype=np.float32)
 
-        player_state = state.players_state[self.player_id]
+        player_state = state.players_state[player_id]
         # hole cards
         hand_index_1 = AlphaHoldemAgent.card_to_index(player_state.hand[0])
         hand_index_2 = AlphaHoldemAgent.card_to_index(player_state.hand[1])
