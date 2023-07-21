@@ -1,154 +1,152 @@
-import tensorflow as tf
-import numpy as np
-from typing import Tuple
-from src.utils.environment import Action, Stage, State, Card, ActionRecord
+import jax
+import jax.numpy as jnp
+from jaxtyping import Key
+import pokers as pkrs
+from src.agents.alphaholdem.model import AlphaHoldem, CardsObservation, ActionsObservation, Policy
 
 
 class AlphaHoldemAgent(object):
     """An agent to wrap the AlphaHoldem model"""
 
-    def __init__(self, player_id: int, model: tf.keras.Model):
+    def __init__(self, player_id: int, model: AlphaHoldem):
         self.player_id = player_id
         self.model = model
-        self.use_raw = False
-        self.num_actions = len(list(Action))
-        self.num_players = 2
 
-        assert (
-            model.output_shape[0][1] == self.num_actions
-        ), f"Model output ({model.output_shape[0][1]}) is not equal to the number of actions {self.num_actions}"
+    def step(self, trace: list[pkrs.State]) -> pkrs.Action:
+        pass
 
-    def step_batch(self, states_batch: list[State]) -> list[int]:
-        actions_encoding = np.array(
-            [
-                self.encode_actions(state, self.player_id, self.num_players, self.num_actions)
-                for state in states_batch
-            ]
-        )
-        cards_encoding = np.array(
-            [self.encode_cards(state, self.player_id) for state in states_batch]
-        )
-
-        policies, _ = self.model({"actions": actions_encoding, "cards": cards_encoding})
-        return list(tf.random.categorical(tf.math.log(policies), num_samples=1)[..., 0].numpy())
+    def step_batch(self, traces: list[list[pkrs.State]]) -> list[pkrs.Action]:
+        pass
 
     @staticmethod
-    def encode_actions(
-        state: State,
-        player_id: int,
-        num_players: int,
-        num_actions: int,
-    ) -> np.ndarray:
-        assert (
-            len(state.players_state) == num_players
-        ), f"AlphaHoldemAgent only supports {num_players} players"
+    def index_to_action(action_index: int, state: pkrs.State) -> pkrs.Action:
+        r = 0
+        match action_index:
+            case 0:
+                action_enum = pkrs.ActionEnum.Call
+            case 1:
+                action_enum = pkrs.ActionEnum.Check
+            case 2:
+                action_enum = pkrs.ActionEnum.Fold
+            case 3:
+                action_enum = pkrs.ActionEnum.Raise
+                r = 1 / 2
+            case 4:
+                action_enum = pkrs.ActionEnum.Raise
+                r = 2 / 3
+            case 5:
+                action_enum = pkrs.ActionEnum.Raise
+                r = 1.0
+            case 6:
+                action_enum = pkrs.ActionEnum.Raise
+                r = 3 / 2
+            case _:
+                raise Exception("Incorrect action")
 
-        actions_encoding = np.zeros((24, num_actions, num_players + 2), dtype=np.float32)
+        if action_enum == pkrs.ActionEnum.Raise:
+            return pkrs.Action(
+                action_enum,
+                ((state.players_state[state.current_player].bet_chips - state.min_bet) + state.pot)
+                * r,
+            )
+        else:
+            return pkrs.Action(action_enum)
 
-        action_record_by_stage: dict[Stage, list[ActionRecord]] = {
-            stage: [] for stage in list(Stage)
+    @staticmethod
+    def encode_actions(trace: list[pkrs.State]) -> ActionsObservation:
+        assert len(trace) > 0
+        num_players = len(trace[0].players_state)
+        num_actions = 4  # len(pkrs.ActionEnum)
+        current_player = trace[-1].current_player
+
+        actions_encoding = jnp.zeros((24, num_actions, num_players + 2), dtype=jnp.float32)
+
+        state_by_stage: dict[int, list[tuple[pkrs.State, pkrs.ActionRecord]]] = {
+            stage: []
+            for stage in (
+                int(pkrs.Stage.Preflop),
+                int(pkrs.Stage.Flop),
+                int(pkrs.Stage.Turn),
+                int(pkrs.Stage.River),
+            )
         }
-        for record in state.action_record:
-            action_record_by_stage[record.stage].append(record)
+        for i in range(0, len(trace) - 1):
+            s = trace[i]
+            a = trace[i + 1].from_action
+            assert a is not None
+            state_by_stage[int(s.stage)].append((s, a))  # type: ignore
 
-        for stage, stage_records in action_record_by_stage.items():
+        for stage, stage_states in state_by_stage.items():
             cycle = 0
-            for record in stage_records:
-                if record.player == player_id:
+            for state, record in stage_states:
+                if record.player == current_player:
                     # Legal actions
-                    legal_actions_indices = [a.value for a in record.legal_actions]
-                    actions_encoding[cycle + 6 * stage.value, legal_actions_indices, -1] = 1.0
+                    legal_actions_indices = [int(a) for a in record.legal_actions]  # type: ignore
+                    actions_encoding = actions_encoding.at[
+                        cycle + 6 * stage, legal_actions_indices, -1
+                    ].set(1.0)
                     cycle += 1
 
                 # Players actions
-                player_position = (record.player - player_id) % num_players
-                action_index = record.action.value
-                actions_encoding[cycle + 6 * stage.value, action_index, player_position] = 1.0
+                player_position = (record.player - current_player) % num_players
+                action_index = int(record.action.action)  # type: ignore
+                if record.action.action == pkrs.ActionEnum.Raise:
+                    actions_encoding = actions_encoding.at[
+                        cycle + 6 * stage, action_index, player_position
+                    ].set(record.action.amount / (state.pot + state.min_bet))
+                else:
+                    actions_encoding = actions_encoding.at[
+                        cycle + 6 * stage, action_index, player_position
+                    ].set(1.0)
 
         # All players actions
-        actions_encoding[..., -2] = np.sum(actions_encoding[..., :-2], axis=-1)
+        actions_encoding = actions_encoding.at[..., -2].set(
+            jnp.sum(actions_encoding[..., :-2], axis=-1)
+        )
 
         return actions_encoding
 
     @staticmethod
-    def encode_cards(state: State, player_id: int) -> np.ndarray:
-        cards = np.zeros((4, 13, 6), dtype=np.float32)
+    def encode_cards(state: pkrs.State) -> CardsObservation:
+        cards = jnp.zeros((4, 13, 6), dtype=jnp.float32)
 
-        player_state = state.players_state[player_id]
+        player_state = state.players_state[state.current_player]
         # hole cards
         hand_index_1 = AlphaHoldemAgent.card_to_index(player_state.hand[0])
         hand_index_2 = AlphaHoldemAgent.card_to_index(player_state.hand[1])
-        cards[hand_index_1[0], hand_index_1[1], 0] = 1.0
-        cards[hand_index_2[0], hand_index_2[1], 0] = 1.0
+        cards = cards.at[hand_index_1[0], hand_index_1[1], 0].set(1.0)
+        cards = cards.at[hand_index_2[0], hand_index_2[1], 0].set(1.0)
 
         # flop cards
         if len(state.public_cards) >= 3:
-            flop_indices = np.array(
+            flop_indices = jnp.array(
                 [AlphaHoldemAgent.card_to_index(card) for card in state.public_cards[:3]]
             )
-            cards[flop_indices[:, 0], flop_indices[:, 1], 1] = 1.0
+            cards = cards.at[flop_indices[:, 0], flop_indices[:, 1], 1].set(1.0)
 
         # turn card
         if len(state.public_cards) >= 4:
             turn_index = AlphaHoldemAgent.card_to_index(state.public_cards[3])
-            cards[turn_index[0], turn_index[1], 2] = 1.0
+            cards = cards.at[turn_index[0], turn_index[1], 2].set(1.0)
 
         # river card
         if len(state.public_cards) >= 5:
             river_index = AlphaHoldemAgent.card_to_index(state.public_cards[4])
-            cards[river_index[0], river_index[1], 3] = 1.0
+            cards = cards.at[river_index[0], river_index[1], 3].set(1.0)
 
         # all public cards
-        cards[..., 4] = np.sum(cards[..., 1:4], axis=-1)
+        cards = cards.at[..., 4].set(jnp.sum(cards[..., 1:4], axis=-1))
 
         # all hole and public cards
-        cards[..., 5] = cards[..., 0] + cards[..., 4]
+        cards = cards.at[..., 5].set(cards[..., 0] + cards[..., 4])
 
         return cards
 
     @staticmethod
-    def card_to_index(card: Card) -> Tuple[int, int]:
-        suit = card[0]
-        number = card[1]
+    def card_to_index(card: pkrs.Card) -> tuple[int, int]:
+        return int(card.suit), int(card.rank)  # type: ignore
 
-        if suit == "D":  # Diamonds
-            i = 0
-        elif suit == "C":  # Clubs
-            i = 1
-        elif suit == "H":  # Hearts
-            i = 2
-        elif suit == "S":  # Spades
-            i = 3
-        else:
-            raise Exception(f"Invalid card suit {suit}")
-
-        if number.isnumeric():
-            j = int(number) - 1
-        elif number == "A":
-            j = 0
-        elif number == "T":
-            j = 9
-        elif number == "J":
-            j = 10
-        elif number == "Q":
-            j = 11
-        elif number == "K":
-            j = 12
-        else:
-            raise Exception(f"Invalid card number {number}")
-
-        return i, j
-
-    def eval_step_batch(self, states_batch: list[State]) -> tuple[list[int], list[np.ndarray]]:
-        """Predict the action given the current state for evaluation.
-            Since the random agents are not trained. This function is equivalent to step function
-
-        Args:
-            state (dict): An dictionary that represents the current state
-
-        Returns:
-            action (int): The action predicted by the agent
-            probs (list): The list of action probabilities
-        """
-
-        return self.step_batch(states_batch), [np.zeros(self.num_actions) for _ in states_batch]
+    @staticmethod
+    def choose_action(policy: Policy, state: pkrs.State, key: Key) -> pkrs.Action:
+        action_index = jax.random.choice(key, jnp.arange(len(policy)), p=policy)
+        return AlphaHoldemAgent.index_to_action(int(action_index), state)

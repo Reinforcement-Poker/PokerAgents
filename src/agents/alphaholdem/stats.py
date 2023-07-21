@@ -1,6 +1,7 @@
-import numpy as np
+import jax.numpy as jnp
+from jaxtyping import Float, Array, Int
+import pokers as pkrs
 from dataclasses import dataclass
-from src.utils.environment import Trace, Action
 
 
 @dataclass
@@ -17,14 +18,23 @@ class SelfPlayStatistics:
 
 
 def calc_self_play_stats(
-    traces: list[Trace],
-    matches_indices: np.ndarray,
-    places: np.ndarray,
+    traces: list[list[pkrs.State]],
+    matches_indices: Int[Array, "n_players n_hands"],
     models_scores: list[float],
 ) -> SelfPlayStatistics:
     assert len(traces) == len(matches_indices)
-    assert len(traces) == len(places)
-    assert len(models_scores) == places.shape[1]
+    return SelfPlayStatistics(
+        rewards=[0.0],
+        avg_reward=0.0,
+        milli_big_blinds_per_hand=0.0,
+        elo_ratings=[0.0],
+        avg_hand_length=0.0,
+        illegal_actions_proportion=0.0,
+        actions_distribution=[0.0],
+        win_rate=0.0,
+        no_played_rate=0.0,
+    )
+
     pool_size = len(models_scores)
     # The ids of the main player (last model of the pool) in each game
     main_player_ids = np.argmax(matches_indices == pool_size - 1, axis=1)
@@ -34,7 +44,7 @@ def calc_self_play_stats(
 
     rewards = np.zeros((len(traces), pool_size))
     for i, (match, t) in enumerate(zip(matches_indices, traces)):
-        for p_id, ps in t[-1].players_state.items():
+        for p_id, ps in enumerate(t[-1].players_state):
             rewards[i, match[p_id]] = ps.reward
     avg_rewards = list(np.nanmean(rewards, axis=0))
 
@@ -43,8 +53,6 @@ def calc_self_play_stats(
     n_no_played = 0
     n_wins = 0
     for i, (p_id, t) in enumerate(zip(main_player_ids, traces)):
-        if p_id == -1:
-            continue
         first_player_action = True
         for a in t[-1].action_record:
             if a.player == p_id:
@@ -80,12 +88,12 @@ def calc_self_play_stats(
 
 # Source: https://towardsdatascience.com/developing-a-generalized-elo-rating-system-for-multiplayer-games-b9b495e87802
 def elo_rating(
-    places: np.ndarray,
-    past_ratings: np.ndarray,
+    places: Int[Array, "n_hands pool_size"],
+    past_ratings: Float[Array, "pool_size"],
     K: float = 40,
     D: float = 400,
     α: float = 1.2,
-) -> np.ndarray:
+) -> Float[Array, "pool_size"]:
     """
     Args:
         places: n_games x pool_size
@@ -99,27 +107,27 @@ def elo_rating(
     assert places.shape[1] == past_ratings.size
 
     # players_mask: n_games x pool_size
-    players_mask = ~np.isnan(places)
-    n_players_all_games = np.sum(players_mask, axis=-1)
+    players_mask = ~jnp.isnan(places)
+    n_players_all_games = jnp.sum(players_mask, axis=-1)
     n_players = n_players_all_games[0]
-    assert np.all(
+    assert jnp.all(
         n_players_all_games == n_players
     ), f"The number of players needs to be the same in all games {n_players_all_games}"
 
     # scores: n_games x pool_size
-    scores = (α ** (n_players - places) - 1) / np.expand_dims(
-        np.sum(α ** (n_players - np.arange(1, n_players + 1)) - 1), axis=0
+    scores = (α ** (n_players - places) - 1) / jnp.expand_dims(
+        jnp.sum(α ** (n_players - jnp.arange(1, n_players + 1)) - 1), axis=0
     )
 
-    ratings = np.copy(past_ratings)
+    ratings = jnp.copy(past_ratings)
     for s, m in zip(scores, players_mask):
         # ratings_diff: pool_size x pool_size
-        ratings_diff = ratings[m][np.newaxis, :] - ratings[m][:, np.newaxis]
+        ratings_diff = ratings[m][jnp.newaxis, :] - ratings[m][:, jnp.newaxis]
         # sigmoids: pool_size x pool_size
         sigmoids = 1 / (1 + 10 ** (ratings_diff / D))
         # expectations: pool_size
         expectations = (
-            2 / (n_players * (n_players - 1)) * np.sum(sigmoids * (1 - np.eye(n_players)), axis=1)
+            2 / (n_players * (n_players - 1)) * jnp.sum(sigmoids * (1 - jnp.eye(n_players)), axis=1)
         )
         ratings[m] += K * (n_players - 1) * (s[m] - expectations)
 
