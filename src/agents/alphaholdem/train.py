@@ -118,7 +118,6 @@ def k_best_selfplay(
         )
         observations = []
         trace = [initial_state]
-        print(pkrs.visualize_trace(trace))
         while not trace[-1].final_state:
             actions_observation = AlphaHoldemAgent.encode_actions(trace)
             cards_observation = AlphaHoldemAgent.encode_cards(trace[-1])
@@ -128,11 +127,10 @@ def k_best_selfplay(
                 cards_observation,
                 train=False,
             )
-            key = jax.random.split(key, 1)
+            _, key = jax.random.split(key)
             action = AlphaHoldemAgent.choose_action(policy, trace[-1], key)
             trace.append(trace[-1].apply_action(action))
             observations.append((actions_observation, cards_observation, action))
-            print(pkrs.visualize_state(trace[-1]))
 
         if trace[-1] != pkrs.StateStatus.Ok:
             last_action = trace[-1].from_action
@@ -158,7 +156,7 @@ def k_best_selfplay(
 
     stats = calc_self_play_stats(traces, matches_indices, models_scores)
 
-    return stats, jax.random.split(key, 1)
+    return stats, jax.random.split(key, 1)[1]
 
 
 def ppo_training(
@@ -188,10 +186,7 @@ def ppo_training(
     opt_state = optimizer.init(model_params)
     batch_iter = tqdm(replay_buffer.batch_iter(batch_size))
     for batch in batch_iter:
-        batched_model = jax.vmap(lambda obs: model.apply(model_params, obs[0], obs[1])[0])
-        batch_π_0 = [batched_initial_model(jnp.array(r.observations))[..., 0] for r in batch]
-        print("batch_π_0:", batch_π_0)
-        exit()
+        loss_fn = build_loss_fn(model=model, θ_0: flax.core.FrozenDict, θ_k: flax.core.FrozenDict)
         # La pérdida se calcula según la política seguida en todos los estados de cada traza
 
         # Esto va en el loss
@@ -211,17 +206,20 @@ def ppo_training(
 def build_loss_fn(model: AlphaHoldem, θ_0: flax.core.FrozenDict, θ_k: flax.core.FrozenDict):
     # TODO: para que esto funcione BufferRecord tiene que ser un struct de arrays
     def loss_fn(buffer_record: BufferRecord):
-        π_0, _ = model.apply(θ_0, observation[0], observation[1])
-        π_k, value = model.apply(θ_k, observation[0], observation[1])
-        train_actor_loss = ppo_loss(
-            advantage,
-            π,
-            π_0,
-            ε=ppo_ε,
+        π_0, _ = jax.vmap(lambda r: model.apply(θ_0, r.actions_observations, r.cards_observations))(
+            buffer_record
         )
-        train_critic_loss = critic_factor * critic_loss(cumulative_reward, value)
-        train_entropy_loss = entropy_factor * entropy_loss(π)
-        train_loss = train_actor_loss + train_critic_loss + train_entropy_loss
+        print("π_0:", π_0)
+        # π_k, value = model.apply(θ_k, observation[0], observation[1])
+        # train_actor_loss = ppo_loss(
+        #     advantage,
+        #     π,
+        #     π_0,
+        #     ε=ppo_ε,
+        # )
+        # train_critic_loss = critic_factor * critic_loss(cumulative_reward, value)
+        # train_entropy_loss = entropy_factor * entropy_loss(π)
+        # train_loss = train_actor_loss + train_critic_loss + train_entropy_loss
 
     return loss_fn
 
