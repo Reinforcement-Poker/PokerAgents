@@ -2,7 +2,7 @@
 from clearml import Task, TaskTypes
 import jax
 import jax.numpy as jnp
-from jaxtyping import Key
+from jaxtyping import Array, Float
 import flax
 import optax
 import pokers as pkrs
@@ -109,14 +109,15 @@ def k_best_selfplay(
     replay_buffer: ReplayBuffer,
     n_hands: int,
     n_players: int,
-    key: Key,
-) -> tuple[SelfPlayStatistics, Key]:
-    def play(match_indices: list[int], key: Key) -> list[pkrs.State]:
+    key: jax.random.KeyArray,
+) -> tuple[SelfPlayStatistics, jax.random.KeyArray]:
+    def play(match_indices: list[int], key: jax.random.KeyArray) -> list[pkrs.State]:
         game_seed = int(jax.random.randint(key, shape=(1,), minval=0, maxval=10000))
         initial_state = pkrs.State.from_seed(
             n_players=n_players, button=0, sb=0.5, bb=1.0, stake=float("inf"), seed=game_seed
         )
-        observations = []
+        actions_observations = []
+        cards_observations = []
         trace = [initial_state]
         while not trace[-1].final_state:
             actions_observation = AlphaHoldemAgent.encode_actions(trace)
@@ -130,15 +131,16 @@ def k_best_selfplay(
             _, key = jax.random.split(key)
             action = AlphaHoldemAgent.choose_action(policy, trace[-1], key)
             trace.append(trace[-1].apply_action(action))
-            observations.append((actions_observation, cards_observation, action))
+            actions_observations.append(actions_observation)
+            cards_observations.append(cards_observation)
 
         if trace[-1] != pkrs.StateStatus.Ok:
             last_action = trace[-1].from_action
             assert last_action is not None
             trace[-1].players_state[last_action.player].reward = -1e12
 
-        rewards = jnp.array([ps.reward for ps in trace[-1].players_state])
-        replay_buffer.update(observations, rewards)
+        rewards = [ps.reward for ps in trace[-1].players_state]
+        replay_buffer.update(actions_observations, cards_observations, rewards)
         # sorted_players = match_indices[jnp.argsort(-rewards)]
         # places = jnp.full(len(models_pool), jnp.nan)
         # places[sorted_players] = jnp.arange(1, n_players + 1)
@@ -174,7 +176,7 @@ def ppo_training(
     grad_clip: float,
     it: int,
     cum_batch_iterations: int,
-    key: Key,
+    key: jax.random.KeyArray,
     task: Task,
 ) -> int:
     initial_model_params = model_params.copy(add_or_replace={})
@@ -186,7 +188,8 @@ def ppo_training(
     opt_state = optimizer.init(model_params)
     batch_iter = tqdm(replay_buffer.batch_iter(batch_size))
     for batch in batch_iter:
-        loss_fn = build_loss_fn(model=model, θ_0: flax.core.FrozenDict, θ_k: flax.core.FrozenDict)
+        loss_fn = build_loss_fn(model=model, θ_0=initial_model_params, θ_k=initial_model_params)
+        loss_fn(batch[0])
         # La pérdida se calcula según la política seguida en todos los estados de cada traza
 
         # Esto va en el loss
@@ -206,10 +209,20 @@ def ppo_training(
 def build_loss_fn(model: AlphaHoldem, θ_0: flax.core.FrozenDict, θ_k: flax.core.FrozenDict):
     # TODO: para que esto funcione BufferRecord tiene que ser un struct de arrays
     def loss_fn(buffer_record: BufferRecord):
-        π_0, _ = jax.vmap(lambda r: model.apply(θ_0, r.actions_observations, r.cards_observations))(
-            buffer_record
+        π_0: Float[Array, "hand_len n_actions+2"]
+        π_0, _ = jax.vmap(lambda a_obs, c_obs: model.apply(θ_0, a_obs, c_obs, train=False))(
+            buffer_record.actions_observations, buffer_record.cards_observations
         )
-        print("π_0:", π_0)
+
+        π_k: Float[Array, "hand_len n_actions+2"]
+        # values: Float[Array, "hand_len"]
+        π_k, values = jax.vmap(lambda a_obs, c_obs: model.apply(θ_k, a_obs, c_obs, train=False))(
+            buffer_record.actions_observations, buffer_record.cards_observations
+        )
+
+        advantages = generalized_advantage_estimation(values, γ, λ)
+        print("advantages:", advantages)
+
         # π_k, value = model.apply(θ_k, observation[0], observation[1])
         # train_actor_loss = ppo_loss(
         #     advantage,
@@ -420,6 +433,17 @@ def build_loss_fn(model: AlphaHoldem, θ_0: flax.core.FrozenDict, θ_k: flax.cor
 
 
 def generalized_advantage_estimation(
+    values: Float[Array, "hand_len"], γ: float, λ: float
+) -> Float[Array, "hand_len"]:
+    Δ = γ * values[1:] - values[:, :-1]
+    # [[1, d1, ...], [0, 1, d1, ...]]
+    discounts = jnp.power(γ * λ, jnp.arange(len(values)))
+    # Aquí tengo que hacer la cumsum cambiando los descuentos
+    # Para tener las ventajas de todos los valores intermedios
+    # return jnp.sum(discounts * Δ)
+
+
+def _generalized_advantage_estimation(
     values: jax.Array, mask: jax.Array, γ: float, λ: float = 0.95
 ) -> jax.Array:
     # mask = tf.cast(mask, tf.float32)
