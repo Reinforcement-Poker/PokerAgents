@@ -12,22 +12,16 @@ class AlphaHoldemAgent(object):
         self.player_id = player_id
         self.model = model
 
-    def step(self, trace: list[pkrs.State]) -> pkrs.Action:
-        pass
-
-    def step_batch(self, traces: list[list[pkrs.State]]) -> list[pkrs.Action]:
-        pass
-
     @staticmethod
     def index_to_action(action_index: int, state: pkrs.State) -> pkrs.Action:
         r = 0
         match action_index:
             case 0:
-                action_enum = pkrs.ActionEnum.Call
+                action_enum = pkrs.ActionEnum.Fold
             case 1:
                 action_enum = pkrs.ActionEnum.Check
             case 2:
-                action_enum = pkrs.ActionEnum.Fold
+                action_enum = pkrs.ActionEnum.Call
             case 3:
                 action_enum = pkrs.ActionEnum.Raise
                 r = 1 / 2
@@ -59,50 +53,29 @@ class AlphaHoldemAgent(object):
         num_actions = 4  # len(pkrs.ActionEnum)
         current_player = trace[-1].current_player
 
-        actions_encoding = jnp.zeros((24, num_actions, num_players + 2), dtype=jnp.float32)
+        actions_encoding = jnp.zeros((24, num_players + 2, num_actions), dtype=jnp.float32)
 
-        state_by_stage: dict[int, list[tuple[pkrs.State, pkrs.ActionRecord]]] = {
-            stage: []
-            for stage in (
-                int(pkrs.Stage.Preflop),
-                int(pkrs.Stage.Flop),
-                int(pkrs.Stage.Turn),
-                int(pkrs.Stage.River),
-            )
-        }
-        for i in range(0, len(trace) - 1):
-            s = trace[i]
-            a = trace[i + 1].from_action
-            assert a is not None
-            state_by_stage[int(s.stage)].append((s, a))  # type: ignore
+        cycle = 0
+        for i in range(1, len(trace)):
+            if trace[i].current_player == current_player:
+                # Legal actions
+                legal_actions_indices = [int(a) for a in trace[i].legal_actions]  # type: ignore
+                actions_encoding = actions_encoding.at[cycle, -2, legal_actions_indices].set(1.0)
+                actions_encoding = actions_encoding.at[cycle, -1].set(int(trace[i].stage))
+                cycle += 1
 
-        for stage, stage_states in state_by_stage.items():
-            cycle = 0
-            for state, record in stage_states:
-                if record.player == current_player:
-                    # Legal actions
-                    legal_actions_indices = [int(a) for a in record.legal_actions]  # type: ignore
-                    actions_encoding = actions_encoding.at[
-                        cycle + 6 * stage, legal_actions_indices, -1
-                    ].set(1.0)
-                    cycle += 1
-
-                # Players actions
-                player_position = (record.player - current_player) % num_players
-                action_index = int(record.action.action)  # type: ignore
-                if record.action.action == pkrs.ActionEnum.Raise:
-                    actions_encoding = actions_encoding.at[
-                        cycle + 6 * stage, action_index, player_position
-                    ].set(record.action.amount / (state.pot + state.min_bet))
-                else:
-                    actions_encoding = actions_encoding.at[
-                        cycle + 6 * stage, action_index, player_position
-                    ].set(1.0)
-
-        # All players actions
-        actions_encoding = actions_encoding.at[..., -2].set(
-            jnp.sum(actions_encoding[..., :-2], axis=-1)
-        )
+            action_record = trace[i].from_action
+            assert action_record is not None
+            player_position = (action_record.player - current_player) % num_players
+            action_index = int(action_record.action.action)  # type: ignore
+            if action_record.action.action == pkrs.ActionEnum.Raise:
+                actions_encoding = actions_encoding.at[cycle, player_position, action_index].set(
+                    action_record.action.amount  # / (trace[i - 1].pot + trace[i - 1].min_bet)
+                )
+            else:
+                actions_encoding = actions_encoding.at[cycle, player_position, action_index].set(
+                    1.0
+                )
 
         return actions_encoding
 
@@ -147,6 +120,20 @@ class AlphaHoldemAgent(object):
         return int(card.suit), int(card.rank)  # type: ignore
 
     @staticmethod
-    def choose_action(policy: Policy, state: pkrs.State, key: Key) -> pkrs.Action:
+    def choose_action(policy: Policy, key: Key, legal_actions: list[pkrs.ActionEnum]) -> int:
+        # Elimino temporalmente la posibilidad de acciones ilegales y de fold para forzar resultados más fáciles de predecir
+        legal_actions_mask = jnp.zeros(7, dtype=bool)
+        for a in legal_actions:
+            if a == pkrs.ActionEnum.Raise:
+                legal_actions_mask = legal_actions_mask.at[3:7].set(True)
+            else:
+                legal_actions_mask = legal_actions_mask.at[int(a)].set(True)
+
+        # policy = policy.at[0].set(0.05)  # Bloquear fold
+
+        # Balance raise probability since 4 policy fields lead to make a raise
+        policy = policy.at[3:7].divide(4)
+        policy = policy / (policy.sum() + 1e-12)
+        policy = policy.at[~legal_actions_mask].set(0.0)
         action_index = jax.random.choice(key, jnp.arange(len(policy)), p=policy)
-        return AlphaHoldemAgent.index_to_action(int(action_index), state)
+        return int(action_index)

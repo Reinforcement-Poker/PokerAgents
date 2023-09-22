@@ -1,13 +1,15 @@
 # %%
 import jax
+import jax.numpy as jnp
 import flax.linen as nn
 from jaxtyping import Array, Float32, Scalar
 
 
-ActionsObservation = Float32[Array, "24 n_actions n_players+2"]
+ActionsObservation = Float32[Array, "24 n_players+2 n_actions"]
 CardsObservation = Float32[Array, "4 13 6"]
 Policy = Float32[Array, "n_actions"]
 Value = Float32[Scalar, ""]
+HandRank = Float32[Scalar, ""]
 
 
 class AlphaHoldem(nn.Module):
@@ -17,24 +19,69 @@ class AlphaHoldem(nn.Module):
         actions_observation: ActionsObservation,
         cards_observation: CardsObservation,
         train: bool = True,
-    ) -> tuple[Policy, Value]:
+    ) -> tuple[Policy, Value, HandRank]:
+        policy = PolicyNet()(actions_observation, cards_observation, train)
+        value, hand_rank = ValueNet()(actions_observation, cards_observation, train)
+
+        return policy, value, hand_rank
+
+
+class PolicyNet(nn.Module):
+    @nn.compact
+    def __call__(
+        self,
+        actions_observation: ActionsObservation,
+        cards_observation: CardsObservation,
+        train: bool = True,
+    ) -> Policy:
         actions_encoding = ActionsEncoder()(actions_observation, train)
         cards_encoding = CardsEncoder()(cards_observation, train)
-        x = jax.numpy.concatenate([actions_encoding, cards_encoding])
+        x = jnp.concatenate([actions_encoding, cards_encoding])
 
         n_actions = actions_observation.shape[1]
-        # Basic actions + raise{1/2, 2/3, 1, 3/2} + value
-        out_dim = n_actions + 3 + 1
-        for i in range(1, 50, 5):
-            x = nn.Dense(features=(out_dim) * 50 // i)(x)
-            x = nn.BatchNorm(use_running_average=not train)(x)
+        for i in range(1, 50, 10):
+            x = nn.Dense(
+                features=(n_actions + 3) * 50 // i,
+                kernel_init=nn.initializers.orthogonal(scale=jnp.sqrt(2)),
+                bias_init=nn.initializers.constant(0.0),
+            )(x)
+            # x = nn.BatchNorm(use_running_average=not train)(x)
+            x = nn.tanh(x)
+
+        x = nn.Dense(
+            n_actions + 3,
+            kernel_init=nn.initializers.orthogonal(scale=0.01),
+            bias_init=nn.initializers.constant(0.0),
+        )(x)
+        policy = nn.softmax(x)
+
+        return policy
+
+
+class ValueNet(nn.Module):
+    @nn.compact
+    def __call__(
+        self,
+        actions_observation: ActionsObservation,
+        cards_observation: CardsObservation,
+        train: bool = True,
+    ) -> tuple[Value, HandRank]:
+        actions_encoding = ActionsEncoder()(actions_observation, train)
+        # jax.debug.print("actions_encoding: {}", actions_encoding.shape)
+        cards_encoding = CardsEncoder()(cards_observation, train)
+        # jax.debug.print("cards_encoding: {}", cards_encoding.shape)
+        x = jnp.concatenate([actions_encoding, cards_encoding])
+        # jax.debug.print("x: {}", x.shape)
+
+        for i in range(6):
+            # jax.debug.print("dense i: {}", i)
+            x = nn.Dense(features=128 // (2**i))(x)
+            # x = nn.BatchNorm(use_running_average=not train)(x)
             x = nn.leaky_relu(x)
 
-        x = nn.Dense(out_dim)(x)
-        policy = nn.softmax(x[:-1])
-        value = nn.sigmoid(x[-1]) * 200 - 100
+        value, hand_rank = nn.Dense(2)(x)
 
-        return policy, value
+        return value, hand_rank
 
 
 class ActionsEncoder(nn.Module):
@@ -44,17 +91,17 @@ class ActionsEncoder(nn.Module):
     ) -> Float32[Array, "64"]:
         x = actions_observation
         x = nn.Conv(features=24, kernel_size=(3, 3), padding="SAME")(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
-        x: Array = nn.leaky_relu(x)
+        # x = nn.BatchNorm(use_running_average=not train)(x)
+        x: Array = nn.tanh(x)
 
         for i in range(5, 7):
             x = nn.Conv(features=2**i, kernel_size=(3, 1), padding="VALID")(x)
-            x: Array = nn.leaky_relu(x)
+            x: Array = nn.tanh(x)
             x = nn.Conv(features=2**i, kernel_size=(3, 3), padding="SAME")(x)
-            x = nn.BatchNorm(use_running_average=not train)(x)
-            x: Array = nn.leaky_relu(x)
+            # x = nn.BatchNorm(use_running_average=not train)(x)
+            x: Array = nn.tanh(x)
 
-        x = jax.numpy.mean(x, axis=(0, 1))
+        x = jnp.mean(x, axis=(0, 1))
         return x
 
 
@@ -66,19 +113,19 @@ class CardsEncoder(nn.Module):
         x = cards_observation
 
         x = nn.Conv(features=24, kernel_size=(3, 3), padding="SAME")(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
-        x: Array = nn.leaky_relu(x)
+        # x = nn.BatchNorm(use_running_average=not train)(x)
+        x: Array = nn.tanh(x)
 
         for i in range(5, 7):
             x = nn.Conv(features=2**i, kernel_size=(1, 3), padding="VALID")(x)
-            x: Array = nn.leaky_relu(x)
+            x: Array = nn.tanh(x)
             x = nn.Conv(features=2**i, kernel_size=(1, 3), padding="VALID")(x)
-            x: Array = nn.leaky_relu(x)
+            x: Array = nn.tanh(x)
             x = nn.Conv(features=2**i, kernel_size=(3, 3), padding="SAME")(x)
-            x = nn.BatchNorm(use_running_average=not train)(x)
-            x: Array = nn.leaky_relu(x)
+            # x = nn.BatchNorm(use_running_average=not train)(x)
+            x: Array = nn.tanh(x)
 
-        x = jax.numpy.mean(x, axis=(0, 1))
+        x = jnp.mean(x, axis=(0, 1))
         return x
 
 
