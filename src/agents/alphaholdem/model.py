@@ -80,6 +80,7 @@ class ValueNet(nn.Module):
             x = nn.leaky_relu(x)
 
         value, hand_rank = nn.Dense(2)(x)
+        value = nn.sigmoid(value)
 
         return value, hand_rank
 
