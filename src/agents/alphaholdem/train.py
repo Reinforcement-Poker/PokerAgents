@@ -27,7 +27,7 @@ jax.config.update("jax_debug_nans", True)
 def train():
     params = {
         "seed": 123456,  # 123456, <- nan temprano
-        "iterations": 1000,
+        "iterations": 10000,
         "hands_per_iter": 80,  # 128,
         "n_players": 2,
         "batch_size": 20,
@@ -47,7 +47,7 @@ def train():
         task_name="Play against only calls agent",
     )
     task.connect(params)
-    task.execute_remotely(queue_name="kaggle-bruno")
+    #task.execute_remotely(queue_name="kaggle-bruno")
 
     key_init, key_buffer, key_selfplay, key_ppo = jax.random.split(
         jax.random.PRNGKey(params["seed"]), 4
@@ -81,19 +81,20 @@ def train():
         )
         models_ratings = self_play_metrics.elo_ratings
 
-        for m, v in self_play_metrics.__dict__.items():
-            if isinstance(v, tuple):
-                task.get_logger().report_histogram(
-                    title=f"self-play | {m}", series=m, values=v[0], xlabels=v[1], iteration=i
-                )
-            elif isinstance(v, list):
-                task.get_logger().report_histogram(
-                    title=f"self-play | {m}", series=m, values=v, iteration=i
-                )
-            else:
-                task.get_logger().report_scalar(
-                    title=f"self-play | {m}", series=m, value=v, iteration=i
-                )
+        if i % 25 == 0:
+            for m, v in self_play_metrics.__dict__.items():
+                if isinstance(v, tuple):
+                    task.get_logger().report_histogram(
+                        title=f"self-play | {m}", series=m, values=v[0], xlabels=v[1], iteration=i
+                    )
+                elif isinstance(v, list):
+                    task.get_logger().report_histogram(
+                        title=f"self-play | {m}", series=m, values=v, iteration=i
+                    )
+                else:
+                    task.get_logger().report_scalar(
+                        title=f"self-play | {m}", series=m, value=v, iteration=i
+                    )
 
         model_params, opt_state, cum_batch_iterations = ppo_training(
             i=i,
