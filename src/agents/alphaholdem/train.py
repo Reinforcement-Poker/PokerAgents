@@ -44,10 +44,10 @@ def train():
     task = Task.init(
         project_name="ReinforcementPoker/AlphaHoldem",
         task_type=TaskTypes.training,
-        task_name="Play against only calls agent",
+        task_name="Play against only calls agent {0, 1} reward",
     )
     task.connect(params)
-    #task.execute_remotely(queue_name="kaggle-bruno")
+    task.execute_remotely(queue_name="vm-bruno")
 
     key_init, key_buffer, key_selfplay, key_ppo = jax.random.split(
         jax.random.PRNGKey(params["seed"]), 4
@@ -340,17 +340,20 @@ def build_ppo_loss(
             batch_values.append(values)
             batch_ranks.append(hand_scores)
 
+            reward = 0.0 if buffer_record.reward <= 0 else 1.0
             advantages = generalized_advantage_estimation(
-                jnp.concatenate([values, jnp.array([buffer_record.reward])]), γ, λ
+                jnp.concatenate([values, jnp.array([reward])]), γ, λ
             )
             batch_advantages.append(advantages)
 
-            discounted_rewards = buffer_record.reward * (γ ** jnp.arange(len(values) - 1, -1, -1))
+            discounted_rewards = reward * (γ ** jnp.arange(len(values) - 1, -1, -1))
             batch_rewards.append(discounted_rewards)
-            jax.debug.print("rew={}, val={}", discounted_rewards, values)
-            jax.debug.print(
-                "real_hand_scores={}, pred_hand_scores={}", buffer_record.hand_scores, hand_scores
-            )
+            jax.debug.print("rewards -----")
+            jax.debug.print("rew={}", discounted_rewards)
+            jax.debug.print("val={}", values)
+            jax.debug.print("hand scores -----")
+            jax.debug.print("real_hand_scores={}", buffer_record.hand_scores)
+            jax.debug.print("pred_hand_scores={}", hand_scores)
 
             batch_actions_taken.append(buffer_record.actions_taken)
 
@@ -449,8 +452,8 @@ def actor_loss(
 
 # TODO: Comprobar si hay que cambiarla (e.g returs = values + advantages)
 def critic_loss(rewards: jax.Array, values: jax.Array) -> jax.Array:
-    return jnp.mean(jnp.abs(rewards - values) / jnp.abs(rewards))
-    # return jnp.mean((rewards - values) ** 2)
+    # return jnp.mean(jnp.abs(rewards - values) / jnp.abs(rewards))
+    return jnp.mean((rewards - values) ** 2)
 
 
 def entropy(π: jax.Array) -> jax.Array:
