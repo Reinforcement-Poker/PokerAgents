@@ -6,6 +6,8 @@ requires-python = ">3.10"
 dependencies = [
     "scikit-fuzzy==0.4.2",
     "pokers==0.1.2",
+    "pgx==2.0.1",
+    "clu==0.0.10",
     "treys==0.1.8",
     "matplotlib==3.7.1",
     "tensorflow==2.12.0",
