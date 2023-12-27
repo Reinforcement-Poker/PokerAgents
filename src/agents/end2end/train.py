@@ -44,6 +44,7 @@ class PolicyModel(nn.Module):
 @flax.struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
+    gradient_norm: metrics.Average.from_output("gradient_norm")
 
 
 @flax.struct.dataclass
@@ -53,7 +54,7 @@ class TrainState:
     optimizer: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     opt_states: list[optax.OptState]
     metrics: Metrics
-    policy_matrix: jax.Array
+    policy_matrix: np.ndarray
 
     @classmethod
     def create(
@@ -68,6 +69,7 @@ class TrainState:
             optimizer=optimizer,
             opt_states=[optimizer.init(p) for p in models_params],
             metrics=Metrics.empty(),
+            policy_matrix=np.zeros((3, 4)),
         )
 
 
@@ -78,14 +80,14 @@ def train():
         "hands_per_iter": 128,
         "game_samples": 20,
         "batch_size": 20,
-        "lr": 1e-3,
+        "lr": 1e-1,
         "grad_clip": 10.0,
     }
 
     task = Task.init(
         project_name="ReinforcementPoker/End2end",
         task_type=TaskTypes.training,
-        task_name="Test end2end",
+        task_name="Test policy matrix",
         tags=["kuhn", "test"],
     )
     task.connect(hyper_params)
@@ -107,13 +109,14 @@ def train():
         train_state: TrainState = train_step(train_state, train_key)
         _, train_key = jax.random.split(train_key)
 
-        print(f"loss={train_state.metrics.loss}")
-        task.get_logger().report_scalar(
-            title="train | loss",
-            series="loss",
-            value=float(train_state.metrics.loss.total),
-            iteration=i,
-        )
+        for metric_name, metric_value in train_state.metrics.compute().items():
+            print(f"{metric_name}={metric_value}")
+            task.get_logger().report_scalar(
+                title=f"train | {metric_name}",
+                series="train",
+                value=float(metric_value),
+                iteration=i,
+            )
         task.get_logger().report_confusion_matrix(
             title="Policy matrix",
             series="train",
@@ -121,14 +124,14 @@ def train():
             matrix=train_state.policy_matrix,
             xaxis="Action",
             yaxis="Initial card",
-            xlabels=["Fold", "Check", "Call", "Bet"],  # TODO: Ordenar bien
+            xlabels=["Call", "Bet", "Fold", "Check"],
             ylabels=["Jack", "Queen", "King"],
         )
 
 
 def train_step(state: TrainState, key: jax.Array) -> TrainState:
     def loss_fn(params):
-        rewards, state = self_play(
+        rewards, new_state, policy_matrix = self_play(
             train_state=state,
             params=params,
             n_hands=10_000,
@@ -136,16 +139,17 @@ def train_step(state: TrainState, key: jax.Array) -> TrainState:
             key=key,
         )
 
-        return -jnp.mean(rewards), state
+        return -jnp.mean(rewards), policy_matrix
 
     # Primero hacer que solo aprenda un jugador
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss_value, state), grads = grad_fn(state.models_params[0])
+    (loss_value, policy_matrix), grads = grad_fn(state.models_params[0])
+    state = state.replace(policy_matrix=np.array(policy_matrix))
     updates, opt_state = state.optimizer.update(grads, state.opt_states[0])
-    norm = optax.global_norm(updates)
-    print("Norm:", norm)
     params = optax.apply_updates(state.models_params[0], updates)  # type: ignore
-    metrics = state.metrics.single_from_model_output(loss=loss_value)
+    metrics = state.metrics.single_from_model_output(
+        loss=loss_value, gradient_norm=optax.global_norm(updates)
+    )
     state = state.replace(
         opt_states=[opt_state, state.opt_states[1]],
         models_params=[params, state.models_params[1]],
@@ -160,9 +164,7 @@ def train_step(state: TrainState, key: jax.Array) -> TrainState:
 # Además solo hay que tener en cuenta las acciones legales
 # Si se superan las 10 iteraciones (<=1024 estados) se samplea una sola acción siguiendo la policy
 # TODO: Usar jax.lax.while_loop
-def self_play(
-    train_state: TrainState, params, n_hands: int, n_samples: int, key: jax.Array
-):
+def self_play(train_state: TrainState, params, n_hands: int, n_samples: int, key: jax.Array):
     env = pgx.make("kuhn_poker")
     init = jax.jit(jax.vmap(env.init))
     step = jax.jit(jax.vmap(env.step))
@@ -188,14 +190,14 @@ def self_play(
                 },
                 obs,
             )
-        )(state.current_player, state.observation)
+        )(
+            state.current_player, state.observation
+        )  # type: ignore
         policy = policy * state.legal_action_mask
         policy = policy / jnp.sum(policy, axis=1)[:, jnp.newaxis]
         if i == 0:
-            jax.debug.print("Policy: {}", policy.shape)
             sample_prob = policy[::2].at[policy[::2] != 0].set(1.0)
             sample_prob /= sample_prob.sum()
-            jax.debug.print("Sample prob: {}", sample_prob.shape)
             action = jax.vmap(
                 lambda p: jax.random.choice(
                     subkey2,
@@ -208,14 +210,12 @@ def self_play(
             decision_weights = policy[::2][
                 jnp.arange(policy.shape[0] // 2)[:, None], action
             ].reshape((-1,))
-            train_state = train_state.replace(
-                policy_matrix=jnp.array(
-                    [
-                        policy[jack].mean(axis=0),
-                        policy[queen].mean(axis=0),
-                        policy[king].mean(axis=0),
-                    ]
-                )
+            policy_matrix = jnp.array(
+                [
+                    policy[state.observation[:, 0] == 1].mean(axis=0),  # jack
+                    policy[state.observation[:, 1] == 1].mean(axis=0),  # queen
+                    policy[state.observation[:, 2] == 1].mean(axis=0),  # king
+                ]
             )
         else:
             action = jax.vmap(
@@ -233,7 +233,7 @@ def self_play(
         truncated = np.array(state.truncated)
         i += 1
 
-    return state.rewards[:, 0] * decision_weights, train_state
+    return state.rewards[:, 0] * decision_weights, train_state, policy_matrix
 
 
 if __name__ == "__main__":
